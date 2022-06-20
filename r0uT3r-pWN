@@ -28,7 +28,7 @@ def banner():
     "######---------------------kUKu r0uT3r pWN Ver 0.4-----------------------#####\n"
     "######________________________-------------______________________________#####\n"
     "######+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++#####\n\n"
-    "Usage: ./kUKu_sh!t.py -i [IP] -p [port] (default port is 80)\n\n"
+    "Usage: ./kUKu.py -i [IP] -p [port] (default port is 80)\n\n"
     "To script or use in a bash for loop simply disable this banner by commenting\n"
     "out #banner() function call on line #240\n"
     "use -h for help\n\n"
